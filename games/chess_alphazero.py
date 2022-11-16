@@ -1,17 +1,17 @@
 import os
-os.environ['path'] += r';C:\\Program Files\\GTK3-Runtime Win64\\bin\\libcairo-2.dll'
 
-import datetime
 import pathlib
 from cairosvg import svg2png
 import numpy as np
-import chess
 from io import BytesIO
 from PIL import Image
 import gym
 import gym_chess
 import numpy
 import torch
+import uuid
+
+import datetime
 
 from .abstract_game import AbstractGame
 
@@ -43,10 +43,10 @@ class MuZeroConfig:
 
 
         ### Game
-        self.observation_shape = (3, 512, 512)  # Dimensions of the game observation, must be 3D (channel, height, width). For a 1D array, please reshape it to (1, 1, length of array)
+        self.observation_shape = (3, 256, 256)  # Dimensions of the game observation, must be 3D (channel, height, width). For a 1D array, please reshape it to (1, 1, length of array)
         self.action_space = list(range(4672))  # Fixed list of all possible actions. You should only edit the length
         self.players = list(range(2))  # List of players. You should only edit the length
-        self.stacked_observations = 32  # Number of previous observations and previous actions to add to the current observation
+        self.stacked_observations = 8  # Number of previous observations and previous actions to add to the current observation
 
         # Evaluate
         self.muzero_player = 0  # Turn Muzero begins to play (0: MuZero plays first, 1: MuZero plays second)
@@ -55,10 +55,10 @@ class MuZeroConfig:
 
 
         ### Self-Play
-        self.num_workers = 1  # Number of simultaneous threads/workers self-playing to feed the replay buffer
-        self.selfplay_on_gpu = False
-        self.max_moves = np.inf  # Maximum number of moves if game is not finished before
-        self.num_simulations = 50  # Number of future moves self-simulated
+        self.num_workers = 0  # Number of simultaneous threads/workers self-playing to feed the replay buffer
+        self.selfplay_on_gpu = True
+        self.max_moves = 250  # Maximum number of moves if game is not finished before
+        self.num_simulations = 4  # Number of future moves self-simulated
         self.discount = 0.997  # Chronological discount of the reward
         self.temperature_threshold = None  # Number of moves before dropping the temperature given by visit_softmax_temperature_fn to 0 (ie selecting the best action). If None, visit_softmax_temperature_fn is used every time
 
@@ -79,13 +79,13 @@ class MuZeroConfig:
         # Residual Network
         self.downsample = 'resnet'  # Downsample observations before representation network, False / "CNN" (lighter) / "resnet" (See paper appendix Network Architecture)
         self.blocks = 16  # Number of blocks in the ResNet
-        self.channels = 256  # Number of channels in the ResNet
-        self.reduced_channels_reward = 256  # Number of channels in reward head
-        self.reduced_channels_value = 256  # Number of channels in value head
-        self.reduced_channels_policy = 256  # Number of channels in policy head
-        self.resnet_fc_reward_layers = [256, 256]  # Define the hidden layers in the reward head of the dynamic network
-        self.resnet_fc_value_layers = [256, 256]  # Define the hidden layers in the value head of the prediction network
-        self.resnet_fc_policy_layers = [256, 256]  # Define the hidden layers in the policy head of the prediction network
+        self.channels = 126  # Number of channels in the ResNet
+        self.reduced_channels_reward = 126  # Number of channels in reward head
+        self.reduced_channels_value = 126  # Number of channels in value head
+        self.reduced_channels_policy = 126  # Number of channels in policy head
+        self.resnet_fc_reward_layers = [126, 126]  # Define the hidden layers in the reward head of the dynamic network
+        self.resnet_fc_value_layers = [126, 126]  # Define the hidden layers in the value head of the prediction network
+        self.resnet_fc_policy_layers = [126, 126]  # Define the hidden layers in the policy head of the prediction network
 
         # Fully Connected Network
         self.encoding_size = 32
@@ -101,7 +101,7 @@ class MuZeroConfig:
         self.results_path = pathlib.Path(__file__).resolve().parents[1] / "results" / pathlib.Path(__file__).stem / datetime.datetime.now().strftime("%Y-%m-%d--%H-%M-%S")  # Path to store the model weights and TensorBoard logs
         self.save_model = True  # Save the checkpoint in results_path as model.checkpoint
         self.training_steps = 1000000  # Total number of training steps (ie weights update according to a batch)
-        self.batch_size = 64  # Number of parts of games to train on at each training step
+        self.batch_size = 32  # Number of parts of games to train on at each training step
         self.checkpoint_interval = 10  # Number of training steps before using the model for self-playing
         self.value_loss_weight = 0.25  # Scale the value loss to avoid overfitting of the value function, paper recommends 0.25 (See paper appendix Reanalyze)
         self.train_on_gpu = torch.cuda.is_available()  # Train on GPU if available
@@ -118,9 +118,9 @@ class MuZeroConfig:
 
 
         ### Replay Buffer
-        self.replay_buffer_size = int(1e6)  # Number of self-play games to keep in the replay buffer
-        self.num_unroll_steps = 20  # Number of game moves to keep for every batch element
-        self.td_steps = 20  # Number of steps in the future to take into account for calculating the target value
+        self.replay_buffer_size = int(1e2)  # Number of self-play games to keep in the replay buffer
+        self.num_unroll_steps = 6  # Number of game moves to keep for every batch element
+        self.td_steps = 8  # Number of steps in the future to take into account for calculating the target value
         self.PER = True  # Prioritized Replay (See paper appendix Training), select in priority the elements in the replay buffer which are unexpected for the network
         self.PER_alpha = 1  # How much prioritization is used, 0 corresponding to the uniform case, paper suggests 1
 
@@ -252,33 +252,47 @@ class Game(AbstractGame):
 
 
 class Chess:
+    def make_dir(self):
+        os.makedirs('chessgame/' + self.game_id, exist_ok=True)
+
     def __init__(self):
         self._env = gym.make('ChessAlphaZero-v0')
         self._env.reset()
         self.board = self._env.env.env._board
         self.player = 1
         self.done = False
+        self.move_number = 0
+
 
     def to_play(self):
         return self.board.turn
 
     def _board_rgb(self):
-        return np.moveaxis(np.array(Image.open(BytesIO(svg2png(self.board._repr_svg_(), output_width=512, output_height=512)))), -1, 0) / 255.0
+        return np.moveaxis(np.array(Image.open(BytesIO(svg2png(self.board._repr_svg_(), output_width=256, output_height=256)))), -1, 0) / 255.0
 
     def reset(self):
         obs = self._env.reset()
         self.board = self._env.env.env._board
         self.player = 1
         self.done = False
+        self.game_id = datetime.datetime.now().strftime("%m-%d-%Y-%H-%M-%S") +'_'+str(uuid.uuid4())
+        self.move_number = 0
+        self.make_dir()
+
         return self._board_rgb()
+    
 
     def step(self, action):
+        self.move_number += 1
         obs,reward,done,_ = self._env.step(action)
         self.board = self._env.env.env._board
         self.player = int(self.board.turn)
         self.done = done
+        board_img = self._board_rgb()
 
-        return self._board_rgb(), reward, done
+        Image.fromarray((board_img * 255).astype(np.uint8).transpose(1,2,0)).save('chessgame/'+str(self.game_id)+'/' + f'{self.move_number}.png')
+
+        return board_img, reward, done
 
     def get_observation(self):
         return self.board.copy()
@@ -304,4 +318,6 @@ class Chess:
 
 if __name__ == '__main__':
     env = Game()
+    actions = env.legal_actions()
+    env.step(actions[0])
     print('hello')
